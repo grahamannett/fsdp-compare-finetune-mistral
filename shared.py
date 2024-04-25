@@ -12,7 +12,6 @@ def get_args():
     parser.add_argument("--wandb_group", type=str, default="mistral-7b")
 
     #
-    parser.add_argument("--import_decoder_layer", action="store_true", default=False)
     parser.add_argument(
         "--decoder_layer_import",
         type=str,

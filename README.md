@@ -7,11 +7,16 @@ originally a fork of: https://github.com/abacaj/fine-tune-mistral but needed mor
 train.py uses fsdp for model training.
 
 
+to run mistral fsdp example: `torchrun --nnodes=1 --nproc-per-node=2 train.py --wandb_mode=online --wandb_group="fsdp/mistral-7b"`
+
+to run with a different model must supply decoder layer like:
+
+`torchrun --nnodes=1 --nproc-per-node=8 train.py --wandb_mode=online --wandb_group="fsdp/fuyu-8b" --model_name="adept/fuyu-8b" --decoder_layer_import="transformers.models.persimmon.modeling_persimmon,PersimmonDecoderLayer"`
 
 <details>
-<summary>original readme</summary>
-
-
+<summary>
+  original readme
+</summary>
 
 # fine-tune-mistral
 
@@ -38,5 +43,4 @@ torchrun --nnodes=1 --nproc-per-node=<REPLACE_WITH_NUMBER_OF_GPUS> train.py
 - Use enough data, I recommend > 1k samples
 - I ran this for 3 epochs on 40k samples, will need to experiment more on epochs because the model was still improving.
 - The better way to tell if your model is improving or just overfitting or even getting worse, you should add evaluation on your task. This is data that is not part of training. For example, on code completion you can evaluate your model on the mbpp validation set or a custom set you have.
-
 </details>
