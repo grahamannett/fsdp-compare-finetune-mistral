@@ -307,13 +307,13 @@ if __name__ == "__main__":
     run_id = str(uuid.uuid4())
     output_dir = f"./outputs/{model_name}/{run_id}"
     date_of_run = datetime.now().strftime("%Y-%m-%d-%I_%M_%S_%p")
-    max_length = 2048  # adjust as needed
+    max_length = args.max_length  # 2048 * 2  # adjust as needed
     disable_dropout = False
     gradient_checkpointing = True
     clip_gradients = True
     shuffle = True  # multipack sampler already does random sampling
-    train_batch_size = 2  # adjust as needed
-    validation_batch_size = 2  # adjust as needed
+    train_batch_size = args.bs_train  # adjust as needed
+    validation_batch_size = args.bs_eval  # adjust as needed
     epochs = 3  # adjust as needed
     acc_steps = 0  # TODO: not implemented here yet
     lr = 2e-05  # adjust as needed

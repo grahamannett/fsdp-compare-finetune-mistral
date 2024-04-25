@@ -6,6 +6,10 @@ def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--model_name", type=str, default="mistralai/Mistral-7B-v0.1")
     parser.add_argument("--tokenizer_kwargs", action="store_true", default=True)
+    parser.add_argument("--max_length", type=int, default=4096)
+    parser.add_argument("--bs_train", type=int, default=2)
+    parser.add_argument("--bs_eval", type=int, default=2)
+
 
     # wandb stuff
     parser.add_argument("--wandb_mode", type=str, default="disabled")
