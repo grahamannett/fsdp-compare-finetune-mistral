@@ -1,28 +1,31 @@
-import random
-from core.supervised_dataset import (
-    DEFAULT_PAD_TOKEN,
-    DEFAULT_EOS_TOKEN,
-    DEFAULT_UNK_TOKEN,
-    SupervisedDataset,
-    DataCollatorForSupervisedDataset,
-)
-from torch.utils.data import DataLoader
-from tqdm import tqdm
+import argparse
+import math
+import uuid
 from datetime import datetime
 
-from core.multipack_sampler import MultipackDistributedBatchSampler
-from dotenv import load_dotenv
-import functools
-import wandb
-import uuid
+import numpy as np
 import torch
 import transformers
-import os
-import math
-import numpy as np
-import argparse
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-load_dotenv()
+import wandb
+from core.multipack_sampler import MultipackDistributedBatchSampler
+from core.supervised_dataset import (
+    DEFAULT_EOS_TOKEN,
+    DEFAULT_PAD_TOKEN,
+    DEFAULT_UNK_TOKEN,
+    DataCollatorForSupervisedDataset,
+    SupervisedDataset,
+)
+
+from shared import get_args, import_dec_layer
+
+try:
+    from rich import print
+except ImportError:
+    print("WARNING - RICH NOT INSTALLED. TERRIBLE AESTHETICS")
+    from pprint import pprint as print
 
 
 def disable_model_dropout(model: torch.nn.Module):
@@ -31,7 +34,7 @@ def disable_model_dropout(model: torch.nn.Module):
             module.p = 0
 
 
-def setup_model(model_name, max_length, use_tokenizer_kwargs=True):
+def setup_model(model_name, max_length, use_tokenizer_kwargs=True, _tok_kwargs={}):
     config = transformers.AutoConfig.from_pretrained(
         model_name,
     )
@@ -46,19 +49,15 @@ def setup_model(model_name, max_length, use_tokenizer_kwargs=True):
     )
 
     if use_tokenizer_kwargs:
-        tokenizer_kwargs = dict(
+        _tok_kwargs = dict(
             model_max_length=max_length,
             padding_side="right",
             use_fast=False,
             pad_token=DEFAULT_PAD_TOKEN,
             trust_remote_code=True,
         )
-    else:
-        tokenizer_kwargs = dict()
 
-    tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_name, **tokenizer_kwargs
-    )
+    tokenizer = transformers.AutoTokenizer.from_pretrained(model_name, **_tok_kwargs)
 
     special_tokens_dict = dict()
     if tokenizer.pad_token is None:
@@ -235,23 +234,21 @@ def get_scheduler(local_rank, scheduler_type, optimizer, max_steps):
 
 def save_model(local_rank, model, tokenizer, outpath, current_epoch, current_step):
     if local_rank == 0:
-        print(f"SAVING MODEL")
+        print("SAVING MODEL")
         outpath += f"/epoch_{current_epoch}/step_{current_step}"
         model.save_pretrained(outpath)
         tokenizer.save_pretrained(outpath)
 
 
 if __name__ == "__main__":
+    # set these if training without fsdp or torch.distributed.  but allow the dataloader/sampler to remain the same
+    world_size = 1
+    local_rank = 0
+
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--model_name", type=str, default="mistralai/Mistral-7B-v0.1")
-    parser.add_argument("--wandb_mode", type=str, default="disabled")
-    parser.add_argument("--wandb_group", type=str, default="mistral-7b")
-
-    parser.add_argument("--tokenizer_kwargs", action="store_true", default=True)
-    args = parser.parse_args()
+    args = get_args()
 
     model_name = args.model_name
     use_tokenizer_kwargs = args.tokenizer_kwargs
@@ -286,6 +283,10 @@ if __name__ == "__main__":
     model, tokenizer = setup_model(model_name, max_length)
     num_params = sum([p.numel() for p in model.parameters()])
 
+    # print all args and locals AFTER Loading original model
+    print("[bold cyan]ARGS[/bold cyan]:", args)
+    print("[bold cyan]LOCALS[/bold cyan]:", locals())
+
     optimizer = get_optimizer(model, lr, weight_decay)
 
     train_ds = ["data/train.jsonl"]
@@ -295,9 +296,6 @@ if __name__ == "__main__":
     )
     val_dataset = SupervisedDataset(train_on_inputs, tokenizer, val_ds, use_dist=False)
     collator = DataCollatorForSupervisedDataset(tokenizer)
-
-    world_size = 1
-    local_rank = 0
 
     train_sampler, train_loader = get_dataloader(
         use_multipack_sampler,
@@ -332,9 +330,9 @@ if __name__ == "__main__":
 
     if local_rank == 0:
         run = wandb.init(
-            project="mistral-7b",
             mode=wandb_mode,
             group=wandb_group,
+            project="compare-instruction-finetune-fsdp",
             job_type="finetune",
             name=run_id,
             config={
