@@ -1,11 +1,15 @@
-import copy
-import logging
 from dataclasses import dataclass
+import os
 from typing import Dict, Sequence
-import json
+from torch.utils.data import Dataset
+import datasets
+import logging
+import torch.distributed as dist
 import torch
 import transformers
-from torch.utils.data import Dataset
+import copy
+import math
+
 
 IGNORE_INDEX = -100
 DEFAULT_PAD_TOKEN = "<|pad|>"
@@ -14,7 +18,7 @@ DEFAULT_UNK_TOKEN = "<|unk|>"
 
 
 def fmt_prompt(prompt):
-    return f"[Instructions]:\n{prompt}\n\n[Response]:"
+    return f"### Instructions:\n{prompt}\n\n### Response:"
 
 
 def _tokenize_fn(
@@ -46,11 +50,13 @@ def _tokenize_fn(
 
 
 def preprocess(
-    sources: Sequence[str],
-    targets: Sequence[str],
+    train_on_inputs: bool,
+    samples: Sequence[str],
     tokenizer: transformers.PreTrainedTokenizer,
 ) -> Dict:
     """Preprocess the data by tokenizing."""
+    sources = [f"{fmt_prompt(question)}" for question in samples["instruction"]]
+    targets = [f"{answer}{tokenizer.eos_token}" for answer in samples["output"]]
     examples = [s + t for s, t in zip(sources, targets)]
     examples_tokenized, sources_tokenized = [
         _tokenize_fn(strings, tokenizer) for strings in (examples, sources)
@@ -58,32 +64,42 @@ def preprocess(
     input_ids = examples_tokenized["input_ids"]
     labels = copy.deepcopy(input_ids)
     for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
-        label[:source_len] = IGNORE_INDEX
+        if not train_on_inputs:
+            label[:source_len] = IGNORE_INDEX
 
     return dict(input_ids=input_ids, labels=labels)
 
 
-def load_json(files, limit):
-    data = []
+def _filter_tokenize_fn(
+    strings: Sequence[str], tokenizer: transformers.PreTrainedTokenizer
+) -> Dict:
+    samples = []
+    for text in strings:
+        tokens = tokenizer(
+            text,
+            return_tensors="pt",
+            padding=False,
+            max_length=tokenizer.model_max_length,
+            truncation=True,
+        )
 
-    for file in files:
-        f = open(file, mode="r")
-        if "jsonl" in file:
-            _data = f.read()
-            _data = _data.splitlines()
-            _data = [json.loads(js) for js in _data]
+        if tokens.input_ids.squeeze().numel() < tokenizer.model_max_length:
+            samples.append(True)
         else:
-            _data = json.load(f)
+            samples.append(False)
 
-        f.close()
+    return samples
 
-        data += _data
-        logging.info(f"loaded data file: {file}, size: {len(data)}")
 
-    if limit > 0:
-        return data[:limit]
+def filter_long_samples(
+    samples: Sequence[str],
+    tokenizer: transformers.PreTrainedTokenizer,
+) -> Dict:
+    sources = [f"{fmt_prompt(question)}" for question in samples["instruction"]]
+    targets = [f"{answer}{tokenizer.eos_token}" for answer in samples["output"]]
+    examples = [s + t for s, t in zip(sources, targets)]
 
-    return data
+    return _filter_tokenize_fn(examples, tokenizer)
 
 
 class SupervisedDataset(Dataset):
@@ -91,36 +107,49 @@ class SupervisedDataset(Dataset):
 
     def __init__(
         self,
+        train_on_inputs: bool,
         tokenizer: transformers.PreTrainedTokenizer,
-        data_path: list[str],
-        limit=-1,
+        data_paths: list[str],
+        limit=None,
+        use_dist: bool = True,
     ):
         super(SupervisedDataset, self).__init__()
-        logging.warning("Loading data...")
-        list_data_dict = load_json(data_path, limit)
+        if use_dist:
+            workers = math.ceil(os.cpu_count() / dist.get_world_size())
+        else:
+            workers = 1
+        logging.warning(f"TOKENIZING WITH NUM_WORKERS: {workers}")
+        dataset = (
+            datasets.load_dataset(
+                "json",
+                data_files=data_paths,
+                split=f"train[0:{limit}]" if limit else "train",
+            )
+            .filter(
+                lambda samples: filter_long_samples(samples, tokenizer),
+                batched=True,
+                batch_size=3000,
+                num_proc=workers,
+            )
+            .map(
+                lambda samples: preprocess(train_on_inputs, samples, tokenizer),
+                batched=True,
+                batch_size=3000,
+                num_proc=workers,
+            )
+        )
 
-        logging.warning("Formatting inputs...")
-
-        sources = [
-            f"{tokenizer.bos_token}{fmt_prompt(example['instruction'])}"
-            for example in list_data_dict
-        ]
-
-        targets = [
-            f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict
-        ]
-
-        logging.warning("Tokenizing inputs... This may take some time...")
-        data_dict = preprocess(sources, targets, tokenizer)
-
-        self.input_ids = data_dict["input_ids"]
-        self.labels = data_dict["labels"]
+        self.input_ids = dataset["input_ids"]
+        self.labels = dataset["labels"]
 
     def __len__(self):
         return len(self.input_ids)
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:
-        return dict(input_ids=self.input_ids[i], labels=self.labels[i])
+        return dict(
+            input_ids=torch.tensor(self.input_ids[i]),
+            labels=torch.tensor(self.labels[i]),
+        )
 
 
 @dataclass

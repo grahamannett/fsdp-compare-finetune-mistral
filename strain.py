@@ -7,26 +7,12 @@ from core.supervised_dataset import (
     DataCollatorForSupervisedDataset,
 )
 from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 from datetime import datetime
-from torch.distributed.fsdp import (
-    FullyShardedDataParallel as FSDP,
-    MixedPrecision,
-    FullStateDictConfig,
-    StateDictType,
-)
-from torch.distributed.fsdp.fully_sharded_data_parallel import (
-    ShardingStrategy,
-)
-from torch.distributed.fsdp.wrap import (
-    transformer_auto_wrap_policy,
-)
-from transformers.models.mistral.modeling_mistral import MistralDecoderLayer
+
 from core.multipack_sampler import MultipackDistributedBatchSampler
 from dotenv import load_dotenv
 import functools
-import torch.distributed as dist
 import wandb
 import uuid
 import torch
@@ -55,6 +41,7 @@ def setup_model(model_name, max_length):
         model_name,
         config=config,
         torch_dtype=torch.bfloat16,
+        device_map="auto",
     )
 
     tokenizer = transformers.AutoTokenizer.from_pretrained(
@@ -104,7 +91,8 @@ def evaluation(
         losses += loss.float()
 
     losses = losses / (step + 1)
-    val_loss = get_all_reduce_mean(losses.clone()).item()
+    # val_loss = get_all_reduce_mean(losses.clone()).item()
+    val_loss = losses.item()
 
     if local_rank == 0:
         wandb.log(
@@ -127,40 +115,22 @@ def get_dataloader(
     collator,
     batch_size,
 ):
-    if use_multipack_sampler:
-        lengths = np.array([len(tokens["input_ids"]) for tokens in dataset])
-        sampler = MultipackDistributedBatchSampler(
-            batch_max_length=batch_size * max_length,
-            lengths=lengths,
-            num_replicas=world_size,
-            rank=local_rank,
-            seed=seed,
-        )
+    lengths = np.array([len(tokens["input_ids"]) for tokens in dataset])
+    sampler = MultipackDistributedBatchSampler(
+        batch_max_length=batch_size * max_length,
+        lengths=lengths,
+        num_replicas=world_size,
+        rank=local_rank,
+        seed=seed,
+        use_dist=False,
+    )
 
-        loader = DataLoader(
-            dataset,
-            pin_memory=True,
-            collate_fn=collator,
-            batch_sampler=sampler,
-        )
-    else:
-        sampler = DistributedSampler(
-            dataset,
-            num_replicas=world_size,
-            rank=local_rank,
-            shuffle=shuffle,
-            seed=seed,
-        )
-
-        loader = DataLoader(
-            dataset,
-            shuffle=False,
-            pin_memory=True,
-            drop_last=True,
-            batch_size=batch_size,
-            collate_fn=collator,
-            sampler=sampler,
-        )
+    loader = DataLoader(
+        dataset,
+        pin_memory=True,
+        collate_fn=collator,
+        batch_sampler=sampler,
+    )
 
     return sampler, loader
 
@@ -231,18 +201,13 @@ def log_stats(pbar, wandb, epoch, loss_tensor, grad_norm, scheduler):
     pbar.set_description(f"Epoch {epoch:.2f}, Loss: {current_loss}, LR: {current_lr}")
 
 
-def get_all_reduce_mean(tensor):
-    torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.SUM)
-    tensor = tensor / torch.distributed.get_world_size()
-    return tensor
-
-
 def get_warmup_steps(num_training_steps, warmup_ratio=0.05):
     return math.ceil(num_training_steps * warmup_ratio)
 
 
 def clip_model_gradients(model, max_grad_norm):
-    return model.clip_grad_norm_(max_grad_norm).item()
+    # return model.clip_grad_norm_(max_grad_norm).item()
+    return torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm).item()
 
 
 def get_scheduler(local_rank, scheduler_type, optimizer, max_steps):
@@ -262,24 +227,16 @@ def get_scheduler(local_rank, scheduler_type, optimizer, max_steps):
 
 
 def save_model(local_rank, model, tokenizer, outpath, current_epoch, current_step):
-    save_policy = FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
-    with FSDP.state_dict_type(model, StateDictType.FULL_STATE_DICT, save_policy):
-        cpu_state = model.state_dict()
-
     if local_rank == 0:
         print(f"SAVING MODEL")
         outpath += f"/epoch_{current_epoch}/step_{current_step}"
-        model.save_pretrained(outpath, state_dict=cpu_state)
+        model.save_pretrained(outpath)
         tokenizer.save_pretrained(outpath)
 
 
 if __name__ == "__main__":
-    local_rank = int(os.environ["LOCAL_RANK"])
-    world_size = int(os.environ["WORLD_SIZE"])
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group("nccl", rank=local_rank, world_size=world_size)
 
     model_name = "mistralai/Mistral-7B-v0.1"
     scheduler_type = "cosine"
@@ -308,35 +265,19 @@ if __name__ == "__main__":
 
     model, tokenizer = setup_model(model_name, max_length)
     num_params = sum([p.numel() for p in model.parameters()])
-    auto_wrap_policy = functools.partial(
-        transformer_auto_wrap_policy,
-        transformer_layer_cls={
-            MistralDecoderLayer,
-        },
-    )
 
-    fsdp_config = dict(
-        auto_wrap_policy=auto_wrap_policy,
-        sharding_strategy=ShardingStrategy.FULL_SHARD,
-        device_id=torch.cuda.current_device(),
-        mixed_precision=MixedPrecision(
-            param_dtype=torch.bfloat16,
-            reduce_dtype=torch.bfloat16,
-            buffer_dtype=torch.bfloat16,
-        ),
-        backward_prefetch=None,
-        param_init_fn=None,
-        cpu_offload=None,
-    )
-
-    model = FSDP(model, **fsdp_config)
     optimizer = get_optimizer(model, lr, weight_decay)
 
     train_ds = ["data/train.jsonl"]
     val_ds = ["data/validation.jsonl"]
-    train_dataset = SupervisedDataset(train_on_inputs, tokenizer, train_ds)
-    val_dataset = SupervisedDataset(train_on_inputs, tokenizer, val_ds)
+    train_dataset = SupervisedDataset(
+        train_on_inputs, tokenizer, train_ds, use_dist=False
+    )
+    val_dataset = SupervisedDataset(train_on_inputs, tokenizer, val_ds, use_dist=False)
     collator = DataCollatorForSupervisedDataset(tokenizer)
+
+    world_size = 1
+    local_rank = 0
 
     train_sampler, train_loader = get_dataloader(
         use_multipack_sampler,
@@ -373,7 +314,7 @@ if __name__ == "__main__":
         run = wandb.init(
             project="mistral-7b",
             job_type="finetune",
-            group="mistral-7b",
+            group="mistral-7b-nofsdp",
             name=run_id,
             config={
                 "model_name": model_name,
@@ -405,7 +346,6 @@ if __name__ == "__main__":
         disable_model_dropout(model)
 
     model.train()
-    dist.barrier()
 
     for epoch in range(0, epochs):
         train_sampler.set_epoch(epoch)
@@ -450,7 +390,8 @@ if __name__ == "__main__":
             loss = loss.detach()
 
             # avg loss over all processes
-            loss = get_all_reduce_mean(loss).item()
+            # loss = get_all_reduce_mean(loss).item()
+            loss = loss.item()
 
             if local_rank == 0:
                 log_stats(

@@ -106,16 +106,23 @@ class MultipackDistributedBatchSampler(Sampler):
         num_replicas: Optional[int] = None,
         rank: Optional[int] = None,
         seed: int = 0,
+        use_dist: bool = True,
     ):
         # Get rank
-        if num_replicas is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            num_replicas = dist.get_world_size()
-        if rank is None:
-            if not dist.is_available():
-                raise RuntimeError("Requires distributed package to be available")
-            rank = dist.get_rank()
+        if use_dist:
+            if num_replicas is None:
+                if not dist.is_available():
+                    raise RuntimeError("Requires distributed package to be available")
+                num_replicas = dist.get_world_size()
+            if rank is None:
+                if not dist.is_available():
+                    raise RuntimeError("Requires distributed package to be available")
+                rank = dist.get_rank()
+        else:
+            if num_replicas is None:
+                num_replicas = 1
+            if rank is None:
+                rank = 0
 
         self.num_replicas = num_replicas
         self.rank = rank
