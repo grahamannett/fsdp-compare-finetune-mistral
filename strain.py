@@ -20,6 +20,7 @@ import transformers
 import os
 import math
 import numpy as np
+import argparse
 
 load_dotenv()
 
@@ -30,7 +31,7 @@ def disable_model_dropout(model: torch.nn.Module):
             module.p = 0
 
 
-def setup_model(model_name, max_length):
+def setup_model(model_name, max_length, use_tokenizer_kwargs=True):
     config = transformers.AutoConfig.from_pretrained(
         model_name,
     )
@@ -44,13 +45,19 @@ def setup_model(model_name, max_length):
         device_map="auto",
     )
 
+    if use_tokenizer_kwargs:
+        tokenizer_kwargs = dict(
+            model_max_length=max_length,
+            padding_side="right",
+            use_fast=False,
+            pad_token=DEFAULT_PAD_TOKEN,
+            trust_remote_code=True,
+        )
+    else:
+        tokenizer_kwargs = dict()
+
     tokenizer = transformers.AutoTokenizer.from_pretrained(
-        model_name,
-        model_max_length=max_length,
-        padding_side="right",
-        use_fast=False,
-        pad_token=DEFAULT_PAD_TOKEN,
-        trust_remote_code=True,
+        model_name, **tokenizer_kwargs
     )
 
     special_tokens_dict = dict()
@@ -238,7 +245,20 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_tf32 = True
     torch.backends.cudnn.allow_tf32 = True
 
-    model_name = "mistralai/Mistral-7B-v0.1"
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--model_name", type=str, default="mistralai/Mistral-7B-v0.1")
+    parser.add_argument("--wandb_mode", type=str, default="disabled")
+    parser.add_argument("--wandb_group", type=str, default="mistral-7b")
+
+    parser.add_argument("--tokenizer_kwargs", action="store_true", default=True)
+    args = parser.parse_args()
+
+    model_name = args.model_name
+    use_tokenizer_kwargs = args.tokenizer_kwargs
+    # wandb
+    wandb_group = args.wandb_group
+    wandb_mode = args.wandb_mode
+
     scheduler_type = "cosine"
     seed = 877645  # set your seed
     transformers.set_seed(seed)
@@ -313,8 +333,9 @@ if __name__ == "__main__":
     if local_rank == 0:
         run = wandb.init(
             project="mistral-7b",
+            mode=wandb_mode,
+            group=wandb_group,
             job_type="finetune",
-            group="mistral-7b-nofsdp",
             name=run_id,
             config={
                 "model_name": model_name,
