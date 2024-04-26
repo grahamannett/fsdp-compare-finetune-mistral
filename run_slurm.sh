@@ -10,8 +10,8 @@
 
 . ~/.bashrc
 
-set -x #echo on
-set -e #exit on error
+# set -x #echo on
+# set -e #exit on error
 
 # module load conda
 
