@@ -9,7 +9,7 @@ def get_args():
     parser.add_argument("--max_length", type=int, default=4096)
     parser.add_argument("--bs_train", type=int, default=2)
     parser.add_argument("--bs_eval", type=int, default=2)
-
+    parser.add_argument("--n_epochs", type=int, default=3)
 
     # wandb stuff
     parser.add_argument("--wandb_mode", type=str, default="disabled")

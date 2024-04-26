@@ -270,7 +270,7 @@ if __name__ == "__main__":
     shuffle = True  # multipack sampler already does random sampling
     train_batch_size = args.bs_train  # adjust as needed
     validation_batch_size = args.bs_eval  # adjust as needed
-    epochs = 3  # adjust as needed
+    epochs = args.n_epochs  # adjust as needed
     acc_steps = 0  # TODO: not implemented here yet
     lr = 2e-05  # adjust as needed
     weight_decay = 0.0  # adjust as needed
