@@ -27,10 +27,9 @@ mamba activate mistral
 export PYTHONUNBUFFERED=TRUE
 cd $HOME/scratch/code/fsdp-compare-finetune-mistral
 
-cmd="echo 'Running...' && \
-python train.py --wandb_mode=online --wandb_group="finetune/fuyu-8b" --model_name="adept/fuyu-8b" --decoder_layer_import="transformers.models.persimmon.modeling_persimmon,PersimmonDecoderLayer" --max_length=2048 --n_epochs=4 && \
-python train.py --wandb_mode=online --wandb_group="finetune/mistral-7b"  --max_length=2048 --n_epochs=4 && \
-echo 'Done'"
+# cmd="echo 'Running...' && \
+# echo 'Done'"
+# srun --pty $cmd
 
 echo -e "STARTING..."
 echo -e "\n===\n"
@@ -39,4 +38,8 @@ echo -e "\n"
 echo -e "==>PWD:$(pwd)"
 echo -e "==>PYTHON: $(which python)"
 
-srun --pty $cmd
+python train.py --wandb_mode=online --wandb_group="finetune/fuyu-8b" --model_name="adept/fuyu-8b" --decoder_layer_import="transformers.models.persimmon.modeling_persimmon,PersimmonDecoderLayer" --max_length=2048 --n_epochs=4
+echo -e "==>DONE with fuyu-8b"
+
+python train.py --wandb_mode=online --wandb_group="finetune/mistral-7b" --max_length=2048 --n_epochs=4
+echo -e "==>DONE with mistral-7b"
